@@ -1,0 +1,1 @@
+python eval.py --dataset_name MAS3K --pred_path ./sam2_configs/checkpoint_test/ --gt_path ./MAS3K/test/label/
