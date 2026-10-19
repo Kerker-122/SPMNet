@@ -1,2 +1,1 @@
-# SMM
-SMM
+# SPMNet
