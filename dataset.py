@@ -3,6 +3,25 @@ import numpy as np
 import random
 import os
 from PIL import Image
+from ccs import shape_targets
+
+
+def paired_files(image_root, gt_root):
+    extensions = ('.jpg', '.jpeg', '.png')
+    def index(root):
+        files = {}
+        for name in os.listdir(root):
+            if name.lower().endswith(extensions):
+                stem = os.path.splitext(name)[0]
+                if stem in files:
+                    raise ValueError(f"Duplicate sample stem: {stem} in {root}")
+                files[stem] = os.path.join(root, name)
+        return files
+    images, masks = index(image_root), index(gt_root)
+    if set(images) != set(masks) or not images:
+        raise ValueError("Image/mask filenames must have matching, nonempty stems")
+    names = sorted(images)
+    return [images[n] for n in names], [masks[n] for n in names]
 from torchvision.transforms import InterpolationMode
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -24,7 +43,7 @@ class Resize(object):
     def __call__(self, data):
         image, label = data['image'], data['label']
 
-        return {'image': F.resize(image, self.size), 'label': F.resize(label, self.size, interpolation=InterpolationMode.BICUBIC)}
+        return {'image': F.resize(image, self.size), 'label': F.resize(label, self.size, interpolation=InterpolationMode.NEAREST)}
 
 
 class RandomHorizontalFlip(object):
@@ -65,11 +84,14 @@ class Normalize(object):
     
 
 class FullDataset(Dataset):
-    def __init__(self, image_root, gt_root, size, mode):
-        self.images = [image_root + f for f in os.listdir(image_root) if f.endswith('.jpg') or f.endswith('.png')]
-        self.gts = [gt_root + f for f in os.listdir(gt_root) if f.endswith('.jpg') or f.endswith('.png')]
-        self.images = sorted(self.images)
-        self.gts = sorted(self.gts)
+    def __init__(self, image_root, gt_root, size, mode, with_shape_fields=False,
+                 field_epsilon=0.01, field_points=30):
+        self.images, self.gts = paired_files(image_root, gt_root)
+        if with_shape_fields and (size < 32 or size % 32):
+            raise ValueError("CCS training size must be a positive multiple of 32")
+        self.with_shape_fields = with_shape_fields
+        self.field_epsilon, self.field_points = field_epsilon, field_points
+        self.field_sizes = [(size // d, size // d) for d in (16, 8, 4)]
         if mode == 'train':
             self.transform = transforms.Compose([
                 Resize((size, size)),
@@ -90,6 +112,12 @@ class FullDataset(Dataset):
         label = self.binary_loader(self.gts[idx])
         data = {'image': image, 'label': label}
         data = self.transform(data)
+        data['label'] = (data['label'] >= 0.5).float()
+        if self.with_shape_fields:
+            # Build AFTER resize and flips to preserve geometry and vector signs.
+            fields, valid = shape_targets(data['label'], self.field_sizes,
+                                           self.field_epsilon, self.field_points)
+            data['shape_fields'], data['shape_valid'] = fields, valid
         return data
 
     def __len__(self):
@@ -109,10 +137,7 @@ class FullDataset(Dataset):
 
 class TestDataset:
     def __init__(self, image_root, gt_root, size):
-        self.images = [image_root + f for f in os.listdir(image_root) if f.endswith('.jpg') or f.endswith('.png')]
-        self.gts = [gt_root + f for f in os.listdir(gt_root) if f.endswith('.jpg') or f.endswith('.png')]
-        self.images = sorted(self.images)
-        self.gts = sorted(self.gts)
+        self.images, self.gts = paired_files(image_root, gt_root)
         self.transform = transforms.Compose([
             transforms.Resize((size, size)),
             transforms.ToTensor(),
@@ -130,7 +155,7 @@ class TestDataset:
         gt = self.binary_loader(self.gts[self.index])
         gt = np.array(gt)
 
-        name = self.images[self.index].split('/')[-1]
+        name = os.path.basename(self.images[self.index])
 
         self.index += 1
         return image, gt, name
